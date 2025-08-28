@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ it.title }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-expand-lg bg-white border-bottom">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('feed') }}">CTI Portal</a>
+  </div>
+</nav>
+
+<div class="container py-4">
+  <h3 class="mb-1">{{ it.title }}</h3>
+  <div class="text-muted mb-3">{{ it.source }} · {{ fmt_ts(it.timestamp) }}</div>
+
+  {% if it.content %}
+    <article class="card">
+      <div class="card-body" style="white-space:pre-wrap; line-height:1.7">{{ it.content }}</div>
+    </article>
+  {% else %}
+    <div class="alert alert-secondary">No content captured yet.</div>
+  {% endif %}
+
+  {% if it.url %}
+    <div class="mt-3">
+      <a class="btn btn-sm btn-outline-secondary" href="{{ it.url }}" target="_blank" rel="noopener">Original</a>
+    </div>
+  {% endif %}
+</div>
+</body>
+</html>

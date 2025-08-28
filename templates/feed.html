@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Threat Feed</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .filter-bar{ background:#6c757d; border-radius:12px; padding:6px 10px; }
+    .filter-bar .btn{ color:#fff; background:transparent; border:0; padding:6px 10px; }
+    .filter-bar .btn:hover{ background:rgba(255,255,255,.15); color:#fff; }
+    .filter-bar .btn-check:checked + label{ background:rgba(255,255,255,.25); color:#fff; }
+  </style>
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-expand-lg bg-white border-bottom sticky-top">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('feed') }}">CTI Portal</a>
+    <div class="ms-auto d-flex align-items-center gap-2">
+      {% if current_user %}
+        <span class="badge text-bg-secondary">{{ current_user.username }}</span>
+        <span class="badge text-bg-info text-uppercase">{{ current_user.role }}</span>
+        <a class="btn btn-outline-danger btn-sm" href="{{ url_for('auth_logout') }}">Logout</a>
+      {% endif %}
+    </div>
+  </div>
+</nav>
+
+<div class="container py-3">
+
+
+
+  <form method="get" class="row g-2 mb-4">
+    <div class="col-md-4">
+      <input class="form-control" type="search" name="q" value="{{ q }}" placeholder="Search title/content…">
+    </div>
+    <div class="col-12">
+      <div class="filter-bar d-flex flex-wrap align-items-center gap-1">
+        {% for s in all_filters %}
+          {% set checked = 'checked' if s in sources else '' %}
+          <input type="checkbox" class="btn-check src-check" id="src-{{ s }}" name="source" value="{{ s }}" {{ checked }}>
+          <label class="btn btn-sm" for="src-{{ s }}">
+            {% if s == 'rss' %}My RSS{% else %}{{ source_label.get(s, s) }}{% endif %}
+          </label>
+        {% endfor %}
+      </div>
+      <div class="form-text">Tip: select “My RSS” alone to view your personal RSS articles.</div>
+    </div>
+    <div class="col-12">
+      <button class="btn btn-primary mt-2">Apply</button>
+    </div>
+  </form>
+
+  <div class="card mb-4">
+    <div class="card-body">
+      <div class="d-flex align-items-center justify-content-between">
+        <h5 class="mb-0">RSS Subscriptions</h5>
+      </div>
+      <form class="row g-2 mt-2" method="post" action="{{ url_for('add_rss') }}">
+        <div class="col-md-7">
+          <input name="rss_url" class="form-control" placeholder="https://example.com/feed.xml" required>
+        </div>
+        <div class="col-md-3">
+          <select class="form-select" name="rss_role">
+            {% for r in ROLES %}
+              <option value="{{ r }}">{{ r }}</option>
+            {% endfor %}
+          </select>
+          <div class="form-text">Min role required to see articles from this feed</div>
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-outline-success w-100" type="submit">Add RSS</button>
+        </div>
+      </form>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="mt-2">
+          {% for cat, msg in messages %}
+            <div class="alert alert-{{ cat }} py-2 mb-2">{{ msg }}</div>
+          {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      <div class="table-responsive mt-3">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th>URL</th>
+              <th>Status</th>
+              <th>Min role</th>
+              <th>Last status</th>
+              <th>Updated</th>
+              <th style="width:170px">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rss_list %}
+              <tr>
+                <td><a href="{{ r.url }}" target="_blank" rel="noreferrer">{{ r.url }}</a></td>
+                <td>
+                  {% if r.enabled %}
+                    <span class="badge text-bg-success">enabled</span>
+                  {% else %}
+                    <span class="badge text-bg-secondary">disabled</span>
+                  {% endif %}
+                </td>
+                <td><span class="badge text-bg-info text-uppercase">{{ r.min_role or 'public' }}</span></td>
+                <td class="text-muted">{{ r.last_status or '—' }}</td>
+                <td class="text-muted">{{ fmt_ts(r.updated_at) }}</td>
+                <td>
+                  <form class="d-inline" method="post" action="{{ url_for('source_toggle', sid=r._id|string) }}">
+                    <button class="btn btn-sm {{ 'btn-warning' if r.enabled else 'btn-success' }}" type="submit">
+                      {{ 'Disable' if r.enabled else 'Enable' }}
+                    </button>
+                  </form>
+                  <form class="d-inline" method="post" action="{{ url_for('source_delete', sid=r._id|string) }}" onsubmit="return confirm('Delete this RSS?');">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="6" class="text-muted">No RSS sources yet. Add one above.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% if not rss_mode %}
+  <div class="row g-3">
+    {% for it in items %}
+    {% set item_link = url_for('item_detail', id=it._id|string) %}
+    <div class="col-12">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          {% set st = SOURCE_STYLE.get(it.source, {"name": it.source, "badge":"secondary", "icon":"📰"}) %}
+          <div class="d-flex justify-content-between align-items-center">
+            <span class="badge bg-{{ st.badge }}">{{ st.icon }} {{ st.name }}</span>
+            <small class="text-muted">{{ fmt_ts(it.timestamp) }}</small>
+          </div>
+
+          <h5 class="mt-2"><a class="link-dark text-decoration-none" href="{{ item_link }}">{{ it.title }}</a></h5>
+
+          {% if it.source == 'msrc_blog' %}
+            <p class="text-secondary">{{ brief_for_public(it.content or '') }}</p>
+            <a class="btn btn-sm btn-outline-primary" href="{{ item_link }}">Read</a>
+
+            {% if it.recommendations and it.recommendations.cybok %}
+              <div class="mt-3 p-2 border rounded">
+                <div class="small text-muted mb-1">CyBOK recommendations</div>
+                <ul class="mb-0">
+                  {% for r in it.recommendations.cybok[:5] %}
+                    <li>
+                      {% if r.sid %}
+                        <a href="{{ url_for('cybok_view', sid=r.sid) }}" target="_self">
+                          {{ r.title }}{% if r.section %} ({{ r.section }}){% endif %}
+                        </a>
+                      {% elif r.url and r.url|lower.startswith('/cybok/') %}
+                        <a href="{{ r.url }}" target="_self">
+                          {{ r.title }}{% if r.section %} ({{ r.section }}){% endif %}
+                        </a>
+                      {% elif r.title or r.section %}
+                        <a href="{{ url_for('cybok_byref', title=r.title, section=r.section, version='v1') }}" target="_self">
+                          {{ r.title }}{% if r.section %} ({{ r.section }}){% endif %}
+                        </a>
+                      {% else %}
+                        <a href="{{ item_link }}" target="_self">
+                          {{ r.title or 'CyBOK section' }}{% if r.section %} ({{ r.section }}){% endif %}
+                        </a>
+                      {% endif %}
+
+                      {% if r.score is not none %}
+                        <span class="text-muted ms-1">score {{ '%.2f'|format(r.score) }}</span>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+          {% endif %}
+
+          {% if it.source == 'krebsonsecurity' %}
+            {% set cves = extract_cves_from_text((it.title or '') ~ ' ' ~ (it.content or '')) %}
+            {% if cves %}
+              <div class="mb-2"><strong>CVE(s):</strong>
+                {% for c in cves %}
+                  <a class="badge text-bg-dark me-1" href="{{ url_for('cve_detail', cve_id=c) }}">{{ c }}</a>
+                {% endfor %}
+              </div>
+            {% endif %}
+            <div class="mb-2">
+              <span class="badge text-bg-success">Highlights</span>
+              <div class="mt-1 text-secondary">{{ threat_points_for_pro(it.content or '') }}</div>
+            </div>
+            <a class="btn btn-sm btn-outline-primary" href="{{ item_link }}">Read</a>
+          {% endif %}
+
+          {% if it.source == 'cisa_kev' %}
+            <p class="text-secondary">{{ brief_for_public(it.content or '', 260) }}</p>
+            {% set cves = extract_cves_from_text((it.title or '') ~ ' ' ~ (it.content or '')) %}
+            {% if cves %}
+              <div class="mb-2"><strong>KEV includes:</strong>
+                {% for c in cves %}
+                  <a class="badge text-bg-warning me-1" href="{{ url_for('cve_detail', cve_id=c) }}">{{ c }}</a>
+                {% endfor %}
+              </div>
+            {% endif %}
+            <a class="btn btn-sm btn-outline-primary" href="{{ item_link }}">Read</a>
+          {% endif %}
+
+          {% if it.source == 'nvd' %}
+            {% if it.nvd_cvss %}
+              <div class="mb-2">
+                <span class="badge text-bg-danger">CVSS {{ it.nvd_cvss.version or '' }}</span>
+                <span class="ms-2">base: <strong>{{ it.nvd_cvss.baseScore or '—' }}</strong> ({{ it.nvd_cvss.baseSeverity or '—' }})</span>
+                {% if it.nvd_cvss.vectorString %}
+                  <div class="text-muted mt-1"><code>{{ it.nvd_cvss.vectorString }}</code></div>
+                {% endif %}
+              </div>
+            {% endif %}
+            {% if it.nvd_cwes %}
+              <div class="mb-2"><strong>CWE:</strong>
+                {% for w in it.nvd_cwes[:5] %}
+                  <span class="badge text-bg-secondary me-1">{{ w }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+            {% if it.nvd_refs %}
+              <div class="mb-2"><strong>Refs:</strong>
+                <ul class="mb-0">
+                  {% for u in it.nvd_refs[:3] %}
+                    <li><a href="{{ u }}" target="_blank" rel="noreferrer">{{ u }}</a></li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+            <a class="btn btn-sm btn-outline-primary" href="{{ item_link }}">Read</a>
+          {% endif %}
+
+          {% if it.source == 'exploitdb' %}
+            <div class="mb-2">
+              <span class="badge text-bg-dark">Exploit available</span>
+              {% if it.edb_id %}<span class="ms-2 text-muted">EDB-ID: {{ it.edb_id }}</span>{% endif %}
+            </div>
+            {% if it.edb_cves and it.edb_cves|length > 0 %}
+              <div class="mb-2"><strong>Related CVEs:</strong>
+                {% for c in it.edb_cves %}
+                  <a class="badge text-bg-danger me-1" href="{{ url_for('cve_detail', cve_id=c) }}">{{ c }}</a>
+                {% endfor %}
+              </div>
+            {% endif %}
+            <p class="text-secondary">{{ brief_for_public(it.content or '', 240) }}</p>
+            <a class="btn btn-sm btn-outline-primary" href="{{ item_link }}">Read</a>
+          {% endif %}
+
+          {% if it.source not in ['msrc_blog','krebsonsecurity','cisa_kev','nvd','exploitdb'] %}
+            <p class="text-secondary">{{ brief_for_public(it.content or '') }}</p>
+            <a class="btn btn-sm btn-outline-primary" href="{{ item_link }}">Read</a>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="row g-3">
+    {% for it in items %}
+    <div class="col-12">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <span class="badge bg-info">🔗 My RSS</span>
+            <small class="text-muted">{{ fmt_ts(it.timestamp) }}</small>
+          </div>
+          <h5 class="mt-2">
+            <a class="link-dark text-decoration-none" href="{{ it.url }}" target="_blank" rel="noopener">
+              {{ it.title }}
+            </a>
+          </h5>
+          <p class="text-secondary">{{ brief_for_public(it.content or '', 240) }}</p>
+          <a class="btn btn-sm btn-outline-primary" href="{{ it.url }}" target="_blank" rel="noopener">Open original</a>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <nav class="mt-3">
+    <ul class="pagination">
+      <li class="page-item {% if not pager.has_prev %}disabled{% endif %}">
+        <a class="page-link" href="?page={{ pager.prev }}&q={{ q }}{% for s in sources %}&source={{ s }}{% endfor %}">Prev</a>
+      </li>
+      <li class="page-item disabled"><span class="page-link">Page {{ pager.page }} / {{ pager.pages }} ({{ pager.total }} items)</span></li>
+      <li class="page-item {% if not pager.has_next %}disabled{% endif %}">
+        <a class="page-link" href="?page={{ pager.next }}&q={{ q }}{% for s in sources %}&source={{ s }}{% endfor %}">Next</a>
+      </li>
+    </ul>
+  </nav>
+</div>
+
+<script>
+(function(){
+  // Celery polling
+  const btn = document.getElementById('btnFetch');
+  const statusEl = document.getElementById('fetchStatus');
+
+  function setStatus(text){ statusEl.textContent = text; }
+  function poll(taskId){
+    fetch(`{{ url_for('task_status', task_id='__TASK__') }}`.replace('__TASK__', taskId))
+      .then(r=>r.json())
+      .then(d=>{
+        const step = d.meta && d.meta.step ? ` · ${d.meta.step}` : '';
+        setStatus(`${d.state}${step}`);
+        if (d.state === 'SUCCESS' || d.state === 'FAILURE') {
+          btn.disabled = false;
+        } else {
+          setTimeout(()=>poll(taskId), 2000);
+        }
+      })
+      .catch(()=>{ btn.disabled = false; setStatus('Error polling'); });
+  }
+
+  btn.addEventListener('click', function(){
+    btn.disabled = true;
+    setStatus('Starting…');
+    fetch(`{{ url_for('fetch_now') }}`, {method:'POST'})
+      .then(r=>r.json())
+      .then(d=>{
+        if (!d.task_id){ throw new Error('no task id'); }
+        setStatus(`Queued: ${d.task_id}`);
+        poll(d.task_id);
+      })
+      .catch(()=>{ btn.disabled=false; setStatus('Failed to enqueue'); });
+  });
+
+  // My RSS is exclusive with other sources
+  const checks = Array.from(document.querySelectorAll('.src-check'));
+  const rss = document.getElementById('src-rss');
+  if (rss){
+    rss.addEventListener('change', ()=>{
+      if (rss.checked){
+        checks.forEach(c=>{ if(c!==rss) c.checked=false; });
+      }
+    });
+    checks.forEach(c=>{
+      if (c!==rss){
+        c.addEventListener('change', ()=>{
+          if (c.checked){ rss.checked=false; }
+        });
+      }
+    });
+  }
+})();
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

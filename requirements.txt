@@ -1,0 +1,48 @@
+# ---- Force CPU Torch (critical) ----
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+torch==2.5.1
+
+# --- Web framework ---
+flask==3.0.3
+werkzeug==3.0.3
+itsdangerous==2.2.0
+click==8.1.7
+jinja2==3.1.4
+
+# --- Celery / Task queue ---
+celery==5.3.6
+redis==5.0.7
+
+# --- Database ---
+pymongo==4.8.0
+dnspython==2.7.0
+
+# --- Utilities ---
+requests==2.32.3
+python-dateutil==2.9.0.post0
+feedparser==6.0.11
+
+# --- Parsing / Content extraction ---
+beautifulsoup4==4.12.3
+lxml==5.3.0
+readability-lxml==0.8.1
+html5lib==1.1
+
+# --- NLP / ML / Vector search ---
+numpy>=1.26,<3.0
+faiss-cpu==1.12.0
+sentence-transformers==3.1.1
+transformers==4.55.2
+scikit-learn==1.5.1
+tokenizers==0.21.4
+
+# --- PDF handling ---
+PyMuPDF==1.24.9
+
+# --- Optional ---
+tqdm==4.66.4
+
+# --- Google Cloud Run / Functions ---
+functions-framework==3.5.0
+gunicorn==22.0.0
