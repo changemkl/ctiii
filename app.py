@@ -559,159 +559,62 @@ def cybok_byref():
     </body></html>
     """, section=safe_section, title=safe_title, body=body_html)
 
-# ----------------- RSS management (username-bound) -----------------
-@app.post("/add_rss")
-@login_required
-def add_rss():
-    owner_name = current_username()
-    rss_url = (request.form.get("rss_url") or "").strip()
-    role_sel = (request.form.get("rss_role") or "public").strip().lower()
-    if role_sel not in ROLES:
-        role_sel = "public"
-    if not rss_url or not re.match(r"^https?://", rss_url, re.I):
-        flash("Invalid RSS URL.", "warning")
-        return redirect(url_for("feed"))
+if __name__ == "__main__":
+    celery_procs = []
 
-    now = datetime.now(timezone.utc)
-    user_rss_sources_coll.update_one(
-        {"owner_username": owner_name, "url": rss_url},
-        {"$set": {
-            "owner_username": owner_name,
-            "url": rss_url,
-            "mode": "rss",
-            "min_role": role_sel,
-            "allowed_roles": [r for r in ROLES if ROLE_ORDER[r] >= ROLE_ORDER[role_sel]],
-            "enabled": True,
-            "updated_at": now,
-        }, "$setOnInsert": {
-            "created_at": now,
-            "last_crawled": None,
-            "last_status": None,
-        }},
-        upsert=True
-    )
+    # --- Always start both Celery workers ---
+    realtime_cmd  = [sys.executable, "-m", "celery", "-A", "worker.celery_app",
+                     "worker", "-l", "info", "-P", "solo", "-Q", "realtime", "-n", "worker.realtime@%h"]
+    scheduled_cmd = [sys.executable, "-m", "celery", "-A", "worker.celery_app",
+                     "worker", "-l", "info", "-P", "solo", "-Q", "scheduled", "-n", "worker.scheduled@%h"]
 
-    ar = run_fetch_user_rss_once.apply_async(
-        args=[owner_name, rss_url, 200],
-        queue="realtime",
-    )
-    flash(f"RSS saved & initial fetch queued (task: {ar.id})", "success")
-    return redirect(url_for("feed"))
+    celery_procs.append(_popen(realtime_cmd,  "celery[realtime]"))
+    celery_procs.append(_popen(scheduled_cmd, "celery[scheduled]"))
 
-@app.post("/sources/<sid>/toggle")
-@login_required
-def source_toggle(sid):
-    owner_name = current_username()
+    # --- Always start beat ---
+    beat_cmd = [sys.executable, "-m", "celery", "-A", "worker.celery_app", "beat", "-l", "info"]
+    celery_procs.append(_popen(beat_cmd, "celery[beat]"))
+
+    # Optional: print PIDs for visibility
     try:
-        oid = ObjectId(sid)
-    except Exception:
-        flash("Invalid source id.", "warning")
-        return redirect(url_for("feed"))
-    doc = user_rss_sources_coll.find_one({"_id": oid, "owner_username": owner_name})
-    if not doc:
-        flash("Source not found or no permission.", "warning")
-        return redirect(url_for("feed"))
-    new_enabled = not bool(doc.get("enabled", True))
-    user_rss_sources_coll.update_one({"_id": oid, "owner_username": owner_name}, {"$set": {"enabled": new_enabled, "updated_at": datetime.now(timezone.utc)}})
-    flash(("Enabled" if new_enabled else "Disabled") + " RSS source.", "info")
-    return redirect(url_for("feed"))
+        for p in celery_procs:
+            print(f"[spawned] pid={p.pid}")
 
-@app.post("/sources/<sid>/delete")
-@login_required
-def source_delete(sid):
-    owner_name = current_username()
-    try:
-        oid = ObjectId(sid)
-    except Exception:
-        flash("Invalid source id.", "warning")
-        return redirect(url_for("feed"))
-    res = user_rss_sources_coll.delete_one({"_id": oid, "owner_username": owner_name})
-    if res.deleted_count == 0:
-        flash("Source not found or no permission.", "warning")
-    else:
-        flash("RSS source deleted.", "danger")
-    return redirect(url_for("feed"))
+        # Keep main process alive while children run.
+        # Exit if any child exits (so supervisors can restart or you can see failure quickly).
+        while True:
+            any_exited = False
+            for p in list(celery_procs):
+                ret = p.poll()
+                if ret is not None:  # child exited
+                    print(f"[exit] pid={p.pid} code={ret}")
+                    any_exited = True
+            if any_exited:
+                break
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("[signal] KeyboardInterrupt, shutting down...")
+    finally:
+        # Graceful shutdown of children
+        for p in celery_procs:
+            try:
+                if os.name == "nt":
+                    p.terminate()
+                else:
+                    os.killpg(p.pid, signal.SIGTERM)
+            except Exception:
+                pass
 
-# app.py  —— 用 gunicorn app:app 启动 Celery（无钩子、无需 Flask）
-import os, sys, subprocess, signal, time, atexit
+        # Wait up to 10s for clean exit, then force-kill
+        deadline = time.time() + 10
+        for p in celery_procs:
+            try:
+                while p.poll() is None and time.time() < deadline:
+                    time.sleep(0.2)
+                if p.poll() is None:
+                    p.kill()
+            except Exception:
+                pass
 
-# ---------- WSGI 对象（让 gunicorn 有东西可挂） ----------
-def app(environ, start_response):
-    start_response("200 OK", [("Content-Type", "text/plain")])
-    return [b"ok"]
-
-# ---------- Celery 子进程管理 ----------
-_children = []
-
-def _popen(cmd, name):
-    print(f"[spawn] {name}: {' '.join(cmd)}", flush=True)
-    # 独立会话，便于整组优雅终止
-    return subprocess.Popen(cmd, start_new_session=True)
-
-def _cleanup():
-    for p in _children:
-        try:
-            os.killpg(p.pid, signal.SIGTERM)
-        except Exception:
-            pass
-    deadline = time.time() + 10
-    for p in _children:
-        try:
-            while p.poll() is None and time.time() < deadline:
-                time.sleep(0.2)
-            if p.poll() is None:
-                p.kill()
-        except Exception:
-            pass
-
-def _handle_sigterm(signum, frame):
-    _cleanup()
-    # 让 gunicorn 退出
-    try:
-        os._exit(0)
-    except Exception:
-        pass
-
-def _start_celery_once():
-    """
-    模块导入时调用。用 /tmp 锁文件保证只启动一次。
-    该文件存在即视为已启动过，避免重复。
-    """
-    lock_path = "/tmp/.celery_started.lock"
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError:
-        # 已有其他进程启动过了
-        return
-
-    # 注册清理/信号
-    atexit.register(_cleanup)
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-
-    # 启动 Celery：两个队列 + 可选 beat
-    base = [sys.executable, "-m", "celery", "-A", "worker.celery_app"]
-
-    realtime_cmd  = base + [
-        "worker", "-l", os.getenv("CELERY_LOGLEVEL", "info"),
-        "-P", os.getenv("CELERY_POOL", "solo"),
-        "-Q", "realtime", "-n", "worker.realtime@%h"
-    ]
-    scheduled_cmd = base + [
-        "worker", "-l", os.getenv("CELERY_LOGLEVEL", "info"),
-        "-P", os.getenv("CELERY_POOL", "solo"),
-        "-Q", "scheduled", "-n", "worker.scheduled@%h"
-    ]
-
-    _children.append(_popen(realtime_cmd,  "celery[realtime]"))
-    _children.append(_popen(scheduled_cmd, "celery[scheduled]"))
-
-    if os.getenv("DISABLE_BEAT", "0") != "1":
-        beat_cmd = base + ["beat", "-l", os.getenv("CELERY_LOGLEVEL", "info")]
-        _children.append(_popen(beat_cmd, "celery[beat]"))
-
-# ---------- 模块导入即尝试启动 Celery ----------
-_start_celery_once()
 
 
