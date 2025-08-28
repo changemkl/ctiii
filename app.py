@@ -575,46 +575,6 @@ if __name__ == "__main__":
     beat_cmd = [sys.executable, "-m", "celery", "-A", "worker.celery_app", "beat", "-l", "info"]
     celery_procs.append(_popen(beat_cmd, "celery[beat]"))
 
-    # Optional: print PIDs for visibility
-    try:
-        for p in celery_procs:
-            print(f"[spawned] pid={p.pid}")
-
-        # Keep main process alive while children run.
-        # Exit if any child exits (so supervisors can restart or you can see failure quickly).
-        while True:
-            any_exited = False
-            for p in list(celery_procs):
-                ret = p.poll()
-                if ret is not None:  # child exited
-                    print(f"[exit] pid={p.pid} code={ret}")
-                    any_exited = True
-            if any_exited:
-                break
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("[signal] KeyboardInterrupt, shutting down...")
-    finally:
-        # Graceful shutdown of children
-        for p in celery_procs:
-            try:
-                if os.name == "nt":
-                    p.terminate()
-                else:
-                    os.killpg(p.pid, signal.SIGTERM)
-            except Exception:
-                pass
-
-        # Wait up to 10s for clean exit, then force-kill
-        deadline = time.time() + 10
-        for p in celery_procs:
-            try:
-                while p.poll() is None and time.time() < deadline:
-                    time.sleep(0.2)
-                if p.poll() is None:
-                    p.kill()
-            except Exception:
-                pass
 
 
 
