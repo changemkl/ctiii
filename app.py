@@ -633,52 +633,63 @@ def source_delete(sid):
     return redirect(url_for("feed"))
 
 # ----------------- Entry -----------------
+import os, sys, subprocess, signal, time, atexit
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 def _popen(cmd, name):
     print(f"[spawn] {name}: {' '.join(cmd)}")
-    creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         return subprocess.Popen(cmd, creationflags=creationflags)
     else:
+        # 独立会话，便于整组优雅终止
         return subprocess.Popen(cmd, start_new_session=True)
 
+def _cleanup(children):
+    for p in children:
+        try:
+            if os.name == "nt":
+                p.terminate()
+            else:
+                os.killpg(p.pid, signal.SIGTERM)
+        except Exception:
+            pass
+    deadline = time.time() + 10
+    for p in children:
+        try:
+            while p.poll() is None and time.time() < deadline:
+                time.sleep(0.2)
+            if p.poll() is None:
+                p.kill()
+        except Exception:
+            pass
+
+def _serve_health_port():
+    """Cloud Run 需要监听 $PORT；起一个极简 HTTP 服务做健康检查。"""
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        def log_message(self, *args):  # 静默日志
+            return
+    port = int(os.environ.get("PORT", "8080"))
+    HTTPServer(("0.0.0.0", port), H).serve_forever()
+
 if __name__ == "__main__":
-    # Only start celery children once (avoid Werkzeug reloader double-start)
-    is_reloader_child = os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("FLASK_DEBUG")
     celery_procs = []
+    atexit.register(lambda: _cleanup(celery_procs))
 
-    if is_reloader_child:
-        # Two workers: realtime / scheduled
-        realtime_cmd  = [sys.executable, "-m", "celery", "-A", "worker.celery_app",
-                         "worker", "-l", "info", "-P", "solo", "-Q", "realtime", "-n", "worker.realtime@%h"]
-        scheduled_cmd = [sys.executable, "-m", "celery", "-A", "worker.celery_app",
-                         "worker", "-l", "info", "-P", "solo", "-Q", "scheduled", "-n", "worker.scheduled@%h"]
+    # 直接启动 Celery：两个队列 + （可选）beat
+    base = [sys.executable, "-m", "celery", "-A", "worker.celery_app"]
+    realtime_cmd  = base + ["worker", "-l", "info", "-P", "solo", "-Q", "realtime",  "-n", "worker.realtime@%h"]
+    scheduled_cmd = base + ["worker", "-l", "info", "-P", "solo", "-Q", "scheduled", "-n", "worker.scheduled@%h"]
 
-        celery_procs.append(_popen(realtime_cmd,  "celery[realtime]"))
-        celery_procs.append(_popen(scheduled_cmd, "celery[scheduled]"))
+    celery_procs.append(_popen(realtime_cmd,  "celery[realtime]"))
+    celery_procs.append(_popen(scheduled_cmd, "celery[scheduled]"))
 
-        if os.getenv("DISABLE_BEAT", "0") != "1":
-            beat_cmd = [sys.executable, "-m", "celery", "-A", "worker.celery_app", "beat", "-l", "info"]
-            celery_procs.append(_popen(beat_cmd, "celery[beat]"))
+    if os.getenv("DISABLE_BEAT", "0") != "1":
+        beat_cmd = base + ["beat", "-l", "info"]
+        celery_procs.append(_popen(beat_cmd, "celery[beat]"))
 
-    try:
-        app.run(debug=True)
-    finally:
-        for p in celery_procs:
-            try:
-                if os.name == "nt":
-                    p.terminate()
-                else:
-                    os.killpg(p.pid, signal.SIGTERM)
-            except Exception:
-                pass
+    # 阻塞在健康检查端口（保持容器存活）
+    _serve_health_port()
 
-        deadline = time.time() + 10
-        for p in celery_procs:
-            try:
-                while p.poll() is None and time.time() < deadline:
-                    time.sleep(0.2)
-                if p.poll() is None:
-                    p.kill()
-            except Exception:
-                pass
