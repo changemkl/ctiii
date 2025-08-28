@@ -632,30 +632,30 @@ def source_delete(sid):
         flash("RSS source deleted.", "danger")
     return redirect(url_for("feed"))
 
-# ----------------- Entry -----------------
+# app.py  —— 用 gunicorn app:app 启动 Celery（无钩子、无需 Flask）
 import os, sys, subprocess, signal, time, atexit
-from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# ---------- WSGI 对象（让 gunicorn 有东西可挂） ----------
+def app(environ, start_response):
+    start_response("200 OK", [("Content-Type", "text/plain")])
+    return [b"ok"]
+
+# ---------- Celery 子进程管理 ----------
+_children = []
 
 def _popen(cmd, name):
-    print(f"[spawn] {name}: {' '.join(cmd)}")
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        return subprocess.Popen(cmd, creationflags=creationflags)
-    else:
-        # 独立会话，便于整组优雅终止
-        return subprocess.Popen(cmd, start_new_session=True)
+    print(f"[spawn] {name}: {' '.join(cmd)}", flush=True)
+    # 独立会话，便于整组优雅终止
+    return subprocess.Popen(cmd, start_new_session=True)
 
-def _cleanup(children):
-    for p in children:
+def _cleanup():
+    for p in _children:
         try:
-            if os.name == "nt":
-                p.terminate()
-            else:
-                os.killpg(p.pid, signal.SIGTERM)
+            os.killpg(p.pid, signal.SIGTERM)
         except Exception:
             pass
     deadline = time.time() + 10
-    for p in children:
+    for p in _children:
         try:
             while p.poll() is None and time.time() < deadline:
                 time.sleep(0.2)
@@ -664,32 +664,54 @@ def _cleanup(children):
         except Exception:
             pass
 
-def _serve_health_port():
-    """Cloud Run 需要监听 $PORT；起一个极简 HTTP 服务做健康检查。"""
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-        def log_message(self, *args):  # 静默日志
-            return
-    port = int(os.environ.get("PORT", "8080"))
-    HTTPServer(("0.0.0.0", port), H).serve_forever()
+def _handle_sigterm(signum, frame):
+    _cleanup()
+    # 让 gunicorn 退出
+    try:
+        os._exit(0)
+    except Exception:
+        pass
 
-if __name__ == "__main__":
-    celery_procs = []
-    atexit.register(lambda: _cleanup(celery_procs))
+def _start_celery_once():
+    """
+    模块导入时调用。用 /tmp 锁文件保证只启动一次。
+    该文件存在即视为已启动过，避免重复。
+    """
+    lock_path = "/tmp/.celery_started.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        # 已有其他进程启动过了
+        return
 
-    # 直接启动 Celery：两个队列 + （可选）beat
+    # 注册清理/信号
+    atexit.register(_cleanup)
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # 启动 Celery：两个队列 + 可选 beat
     base = [sys.executable, "-m", "celery", "-A", "worker.celery_app"]
-    realtime_cmd  = base + ["worker", "-l", "info", "-P", "solo", "-Q", "realtime",  "-n", "worker.realtime@%h"]
-    scheduled_cmd = base + ["worker", "-l", "info", "-P", "solo", "-Q", "scheduled", "-n", "worker.scheduled@%h"]
 
-    celery_procs.append(_popen(realtime_cmd,  "celery[realtime]"))
-    celery_procs.append(_popen(scheduled_cmd, "celery[scheduled]"))
+    realtime_cmd  = base + [
+        "worker", "-l", os.getenv("CELERY_LOGLEVEL", "info"),
+        "-P", os.getenv("CELERY_POOL", "solo"),
+        "-Q", "realtime", "-n", "worker.realtime@%h"
+    ]
+    scheduled_cmd = base + [
+        "worker", "-l", os.getenv("CELERY_LOGLEVEL", "info"),
+        "-P", os.getenv("CELERY_POOL", "solo"),
+        "-Q", "scheduled", "-n", "worker.scheduled@%h"
+    ]
+
+    _children.append(_popen(realtime_cmd,  "celery[realtime]"))
+    _children.append(_popen(scheduled_cmd, "celery[scheduled]"))
 
     if os.getenv("DISABLE_BEAT", "0") != "1":
-        beat_cmd = base + ["beat", "-l", "info"]
-        celery_procs.append(_popen(beat_cmd, "celery[beat]"))
+        beat_cmd = base + ["beat", "-l", os.getenv("CELERY_LOGLEVEL", "info")]
+        _children.append(_popen(beat_cmd, "celery[beat]"))
 
-    # 阻塞在健康检查端口（保持容器存活）
-    _serve_health_port()
+# ---------- 模块导入即尝试启动 Celery ----------
+_start_celery_once()
+
 
