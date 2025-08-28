@@ -559,22 +559,5 @@ def cybok_byref():
     </body></html>
     """, section=safe_section, title=safe_title, body=body_html)
 
-if __name__ == "__main__":
-    celery_procs = []
-
-    # --- Always start both Celery workers ---
-    realtime_cmd  = [sys.executable, "-m", "celery", "-A", "worker.celery_app",
-                     "worker", "-l", "info", "-P", "solo", "-Q", "realtime", "-n", "worker.realtime@%h"]
-    scheduled_cmd = [sys.executable, "-m", "celery", "-A", "worker.celery_app",
-                     "worker", "-l", "info", "-P", "solo", "-Q", "scheduled", "-n", "worker.scheduled@%h"]
-
-    celery_procs.append(_popen(realtime_cmd,  "celery[realtime]"))
-    celery_procs.append(_popen(scheduled_cmd, "celery[scheduled]"))
-
-    # --- Always start beat ---
-    beat_cmd = [sys.executable, "-m", "celery", "-A", "worker.celery_app", "beat", "-l", "info"]
-    celery_procs.append(_popen(beat_cmd, "celery[beat]"))
-
-
 
 
